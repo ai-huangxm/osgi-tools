@@ -21,7 +21,7 @@ public class BundleAnalyzer {
         }
     }
 
-    private List<BundleManifest> readBundleManifest() throws Exception {
+    public List<BundleManifest> readBundleManifest() throws Exception {
         File[] bundleFiles = new File(path).listFiles();
         List<BundleManifest> bundleManifestList = new ArrayList<BundleManifest>();
         for (int i = 0; i < bundleFiles.length; i++) {
@@ -34,7 +34,7 @@ public class BundleAnalyzer {
         return bundleManifestList;
     }
 
-    private BundleManifest readBundleManifest(String bundleName) throws Exception {
+    public BundleManifest readBundleManifest(String bundleName) throws Exception {
         if (null == bundleName || bundleName.isEmpty()) {
             throw new Exception("the argument \"bundleName\" cannot be null");
         }
@@ -79,25 +79,38 @@ public class BundleAnalyzer {
 
     public void analyzeUnsatisfiedBundles() throws Exception {
         List<BundleManifest> bundleManifestList = readBundleManifest();
-        Map<String, Set<BundleManifest>> exportPackageMap = indexExportPackage(bundleManifestList);
+        Map<String, Set<ExportPackage>> exportPackageMap = indexExportPackage(bundleManifestList);
         Iterator<BundleManifest> iterator = bundleManifestList.iterator();
         while (iterator.hasNext()) {
             BundleManifest bundleManifest = iterator.next();
-            String[] importPackages = bundleManifest.getImportPackages();
-            List<String> unsatisfiedPackages = new ArrayList<String>();
+            ImportPackage[] importPackages = bundleManifest.getImportPackages();
+            List<ImportPackage> unsatisfiedPackages = new ArrayList<ImportPackage>();
+            List<ImportPackage> duplicatedPackages = new ArrayList<ImportPackage>();
 
             for (int i = 0; i < importPackages.length; i++) {
-                String importPackage = importPackages[i].trim();
-                if (importPackage.isEmpty()) {
+                String javaPackage = importPackages[i].getJavaPackage().trim();
+                boolean resolution = importPackages[i].getResolution();
+                if (javaPackage.isEmpty()) {
                     continue;
                 }
 
-                if (exportPackageMap.containsKey(importPackage)) {
+                if (!resolution) {
                     continue;
                 }
 
-                if (importPackage.indexOf(".") >= 0) {
-                    String[] strArr = importPackage.split("\\.");
+                if (exportPackageMap.containsKey(javaPackage)) {
+                    Set<ExportPackage> exportPackageSet = exportPackageMap.get(javaPackage);
+                    ExportPackage[] matchedExportPackages = matchPackageVersion(importPackages[i].getVersion(), exportPackageSet);
+                    if (null != matchedExportPackages && matchedExportPackages.length > 0) {
+                        if (matchedExportPackages.length > 1) {
+                            duplicatedPackages.add(importPackages[i]);
+                        }
+                        continue;
+                    }
+                }
+
+                if (javaPackage.indexOf(".") >= 0) {
+                    String[] strArr = javaPackage.split("\\.");
                     if (null != strArr && strArr.length > 0) {
                         boolean isMatched = false;
                         for (int j = strArr.length - 2; j >= 1; j--) {
@@ -106,51 +119,116 @@ public class BundleAnalyzer {
                                 stringBuffer.append("." + strArr[k].trim());
                             }
                             if (exportPackageMap.containsKey(stringBuffer.toString())) {
-                                isMatched = true;
-                                break;
+                                Set<ExportPackage> exportPackageSet = exportPackageMap.get(stringBuffer.toString());
+                                ExportPackage[] matchedExportPackages = matchPackageVersion(importPackages[i].getVersion(), exportPackageSet);
+                                if (null != matchedExportPackages && matchedExportPackages.length > 0) {
+                                    if (matchedExportPackages.length > 1) {
+                                        duplicatedPackages.add(importPackages[i]);
+                                    }
+                                    isMatched = true;
+                                    break;
+                                }
                             }
                         }
 
                         if (!isMatched) {
-                            unsatisfiedPackages.add(importPackage);
+                            unsatisfiedPackages.add(importPackages[i]);
                         }
                     }
                 } else {
-                    if (!exportPackageMap.containsKey(importPackage)) {
-                        unsatisfiedPackages.add(importPackage);
+                    if (!exportPackageMap.containsKey(javaPackage)) {
+                        unsatisfiedPackages.add(importPackages[i]);
+                    } else {
+                        Set<ExportPackage> exportPackageSet = exportPackageMap.get(javaPackage);
+                        ExportPackage[] matchedExportPackages = matchPackageVersion(importPackages[i].getVersion(), exportPackageSet);
+                        if (null == matchedExportPackages || matchedExportPackages.length <= 0) {
+                            unsatisfiedPackages.add(importPackages[i]);
+                        } else {
+                            if (matchedExportPackages.length > 1) {
+                                duplicatedPackages.add(importPackages[i]);
+                            }
+                        }
                     }
                 }
             }
 
-            if (unsatisfiedPackages.size() > 0) {
+            if (unsatisfiedPackages.size() > 0 || duplicatedPackages.size() > 0) {
                 System.out.println("Unsatisfied bundle: "
                         + bundleManifest.getValue("Bundle-SymbolicName")
                         + "_" + bundleManifest.getValue("Bundle-Version"));
-                System.out.println("    Unsatisfied Import-Package:");
-                for (String unsatisfiedPackage : unsatisfiedPackages) {
-                    System.out.println("        " + unsatisfiedPackage);
+                if (unsatisfiedPackages.size() > 0) {
+                    System.out.println("    Unsatisfied Import-Package:");
+                    for (ImportPackage unsatisfiedPackage : unsatisfiedPackages) {
+                        System.out.println("        " + unsatisfiedPackage.getJavaPackage()
+                                + ";version=\"" + unsatisfiedPackage.getVersion() + "\"" );
+                    }
+                }
+
+                if (duplicatedPackages.size() > 0) {
+                    System.out.println("    Duplicated Import-Package:");
+                    for (ImportPackage duplicatedPackage : duplicatedPackages) {
+                        System.out.println("        " + duplicatedPackage.getJavaPackage()
+                                + ";version=\"" + duplicatedPackage.getVersion() + "\"" );
+                    }
                 }
             }
         }
     }
 
-    private Map<String, Set<BundleManifest>> indexExportPackage(List<BundleManifest> bundleManifests) {
-        Map<String, Set<BundleManifest>> exportPackageMap = new HashMap<String, Set<BundleManifest>>();
-        if (null != bundleManifests) {
-            Iterator<BundleManifest> iterator = bundleManifests.iterator();
-            while (iterator.hasNext()) {
-                BundleManifest bundleManifest = iterator.next();
-                String[] exportPackages = bundleManifest.getExportPackages();
-                for (int i = 0; i < exportPackages.length; i++) {
-                    String exportPackage = exportPackages[i];
-                    Set<BundleManifest> bundleManifestSet = null;
-                    if (exportPackageMap.containsKey(exportPackage)) {
-                        bundleManifestSet = exportPackageMap.get(exportPackage);
-                    } else {
-                        bundleManifestSet = new HashSet<BundleManifest>();
-                        exportPackageMap.put(exportPackage, bundleManifestSet);
+    private ExportPackage[] matchPackageVersion(String importVersion, Set<ExportPackage> exportPackageSet) {
+        if (null == importVersion && importVersion.isEmpty()) {
+            return exportPackageSet.toArray(new ExportPackage[0]);
+        }
+
+        List<ExportPackage> matchedExportPackages = new ArrayList<ExportPackage>();
+        for (ExportPackage exportPackage : exportPackageSet) {
+            String exportVersion = exportPackage.getVersion();
+            if (importVersion.indexOf(",") < 0) {
+                if (exportVersion.compareTo(importVersion) >= 0) {
+                    matchedExportPackages.add(exportPackage);
+                }
+            } else {
+                String versionValues[] = importVersion.split(",");
+                String importVersionBegin = versionValues[0].substring(1).trim();
+                String importVersionEnd = versionValues[1].substring(0, versionValues[1].length() - 1).trim();
+                if (importVersion.startsWith("[") && importVersion.endsWith("]")) {
+                    if (exportVersion.compareTo(importVersionBegin) >= 0 && exportVersion.compareTo(importVersionEnd) <= 0) {
+                        matchedExportPackages.add(exportPackage);
                     }
-                    bundleManifestSet.add(bundleManifest);
+                } else if (importVersion.startsWith("(") && importVersion.endsWith(")")) {
+                    if (exportVersion.compareTo(importVersionBegin) > 0 && exportVersion.compareTo(importVersionEnd) < 0) {
+                        matchedExportPackages.add(exportPackage);
+                    }
+                } else if (importVersion.startsWith("[") && importVersion.endsWith(")")) {
+                    if (exportVersion.compareTo(importVersionBegin) >= 0 && exportVersion.compareTo(importVersionEnd) < 0) {
+                        matchedExportPackages.add(exportPackage);
+                    }
+                } else if (importVersion.startsWith("(") && importVersion.endsWith("]")) {
+                    if (exportVersion.compareTo(importVersionBegin) > 0 && exportVersion.compareTo(importVersionEnd) <= 0) {
+                        matchedExportPackages.add(exportPackage);
+                    }
+                }
+            }
+        }
+
+        return matchedExportPackages.toArray(new ExportPackage[0]);
+    }
+
+    private Map<String, Set<ExportPackage>> indexExportPackage(List<BundleManifest> bundleManifests) {
+        Map<String, Set<ExportPackage>> exportPackageMap = new HashMap<String, Set<ExportPackage>>();
+        if (null != bundleManifests) {
+            for (BundleManifest bundleManifest : bundleManifests) {
+                ExportPackage[] exportPackages = bundleManifest.getExportPackages();
+                for (ExportPackage exportPackage : exportPackages) {
+                    Set<ExportPackage> exportPackageSet = null;
+                    String javaPackage = exportPackage.getJavaPackage();
+                    if (exportPackageMap.containsKey(javaPackage)) {
+                        exportPackageSet = exportPackageMap.get(javaPackage);
+                    } else {
+                        exportPackageSet = new HashSet<ExportPackage>();
+                        exportPackageMap.put(javaPackage, exportPackageSet);
+                    }
+                    exportPackageSet.add(exportPackage);
                 }
             }
         }
@@ -159,9 +237,15 @@ public class BundleAnalyzer {
 
     public static void main(String[] args) throws Exception {
         String path = "E:/Work/temp/wso2am-1.10.0/repository/components/plugins";
-//        String bundleName = "org.wso2.carbon.ui_4.4.3.jar";
-//        String path = "E:\\Work\\temp\\tmp";
         BundleAnalyzer bundleAnalyzer = new BundleAnalyzer(path);
         bundleAnalyzer.analyzeUnsatisfiedBundles();
+//        List<BundleManifest> bundleManifestList = bundleAnalyzer.readBundleManifest();
+//        for (BundleManifest bundleManifest : bundleManifestList) {
+//            for (ExportPackage exportPackage : bundleManifest.getExportPackages()) {
+//                if (exportPackage.getJavaPackage().equals("org.wso2.carbon.registry.core.config")) {
+//                    System.out.println("==========================");
+//                }
+//            }
+//        }
     }
 }
